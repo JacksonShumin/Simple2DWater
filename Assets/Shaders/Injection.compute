@@ -1,0 +1,36 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+RWTexture2D<float4> FluidMapIn;     // read only fluid map before injection
+RWTexture2D<float4> FluidMapOut;    // write only fluid map for after injection
+RWTexture2D<float> Obsticles;       // write only map for obsticles
+
+// x and y are pixel positions
+// z is radius
+// w is amount
+float4 InjectionInfo;
+
+// whether this is drawing fluid or obsticles
+int type;
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float fluid = FluidMapIn[id.xy];
+    
+    // check if this cell falls inside the injection radius
+    if (length(id.xy - InjectionInfo.xy) < InjectionInfo.z)
+    {
+        // check type: 0 injects fluid and 1 injects obsticles
+        if (type == 0)
+        {
+            fluid = max(fluid, InjectionInfo.w);
+            FluidMapOut[id.xy] = fluid;
+        }
+        else
+        {
+            Obsticles[id.xy] = 1;
+        }
+    }
+    
+}

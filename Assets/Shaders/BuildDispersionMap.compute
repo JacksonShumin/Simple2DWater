@@ -1,0 +1,219 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Texture holding the values for fluids
+RWTexture2D<float> Fluid;
+
+// Texture holding information about obsticles
+RWTexture2D<float> Obsticles;
+
+// Dispersion Map representing outwards flow of each cell
+    // (up, down, right, left)
+RWTexture2D<float4> Dispersion;
+
+// How much more pressure a tile can hold then the tile above it
+float PressureIncrement;
+
+// Vector representing gravity in the xy channels
+float4 gravity; 
+
+// Taken from Jon Gallant's Liquid Simulator and converted from C# to HLSL
+    // https://github.com/jongallant/LiquidSimulator/blob/master/Assets/Scripts/LiquidSimulator.cs 
+// Calculate how much liquid should flow to destination with pressure
+float CalculateVerticalFlowValue(float remainingLiquid, float destinationLiquid)
+{
+    float MaxValue = 1;
+    
+    float sum = remainingLiquid + destinationLiquid;
+    float value = 0;
+
+    if (sum <= MaxValue)
+    {
+        value = MaxValue;
+    }
+    else if (sum < 2 * MaxValue + PressureIncrement)
+    {
+        value = (MaxValue * MaxValue + sum * PressureIncrement) / (MaxValue + PressureIncrement);
+    }
+    else
+    {
+        value = (sum + PressureIncrement) / 2;
+    }
+
+    return value;
+}
+
+// Calculates how much water would flow into this other tile from gravity
+    // fluidH ------> The fluid level here
+    // fluidD ------> The fluid level we are checking against (the tile bellow)
+    // stake -------> A score for how close to down this tile is with gravity
+    // sum ---------> The sum of all the stakes for every direction
+float FlowDownRatio(float fluidH, float fluidD, float stake, float sum)
+{
+    // short circuit out if this cell isn't important
+    if (stake == 0)
+        return 0;
+    
+    float MaxFlow = 5;
+    
+    // Get the outwards flow
+    float downwardsFlow = CalculateVerticalFlowValue(fluidH, fluidD) - fluidD;
+    downwardsFlow = max(downwardsFlow, 0);                          // No negative numbers
+    downwardsFlow = min(downwardsFlow, fluidH);                     // Cannot have more fluid flowing then there is fluid in this cell
+    downwardsFlow = min(downwardsFlow * (stake / sum), MaxFlow);    // Apply stake precentage and ensure it does not exceed the maximum flow
+    
+    return downwardsFlow;
+}
+
+// Calculates how much water would flow into this other tile from water pressure
+    // fluidH ------> The fluid level here
+    // fluidU ------> The fluid level we are checking against (the tile above)
+    // stake -------> A score for how close to up this tile is with gravity
+    // sum ---------> The sum of all the stakes for every direction
+float FlowUpRatio(float fluidH, float fluidU, float stake, float sum)
+{
+    // short circuit out if this cell isn't important
+    if (stake == 0)
+        return 0;
+    
+    float MaxFlow = 5;
+    
+    // Get the outwards flow
+    float UpwardsFlow = fluidH - CalculateVerticalFlowValue(fluidH, fluidU);       
+    UpwardsFlow = max(UpwardsFlow, 0);             // No negative numbers                                
+    UpwardsFlow = min(UpwardsFlow, fluidH);        // Cannot have more fluid flowing then there is fluid in this cell                             
+    
+    // Apply stake precentage and ensure it does not exceed the maximum flow
+    return min(UpwardsFlow, MaxFlow) * (stake / sum);   
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    // check for zero gravity 
+    if (length(gravity) == 0)
+        gravity = float4(0, -1, 0, 0);
+    
+    // fluid at this location before any modifications
+    float fluidH = Fluid[id.xy];
+    
+    // keeps track of the fluid as it flows outwards
+    float fluid = fluidH;
+    
+    // "Dispersion" => keeps track of the outwards flow
+    float4 disp = float4(0, 0, 0, 0);
+    
+    // if this is an obsticle or empty then there is no fluid to travel outwards
+    if (Obsticles[id.xy].r > 0 || fluidH == 0)
+    {
+        Dispersion[id.xy] = disp;
+        return;
+    }
+    
+    // collect adjacent fluids levels
+    float fluidU = Fluid[id.xy + uint2(0, 1)];
+    float fluidD = Fluid[id.xy - uint2(0, 1)];
+    float fluidR = Fluid[id.xy + uint2(1, 0)];
+    float fluidL = Fluid[id.xy - uint2(1, 0)];
+    
+    // collect adjacent obsticle information
+    float obsticleU = Obsticles[id.xy + uint2(0, 1)];
+    float obsticleD = Obsticles[id.xy - uint2(0, 1)];
+    float obsticleR = Obsticles[id.xy + uint2(1, 0)];
+    float obsticleL = Obsticles[id.xy - uint2(1, 0)];
+    
+    // the most fluid that can travel in a direction relative to gravity
+    float MaxFlow = 5.0f;
+    
+    
+    // Flow downwards
+  
+    // How much of each unit direction is considered "Downward"
+    float upwardsStake      =  max(0, gravity.y);
+    float downwardsStake    =  max(0, -gravity.y);
+    float rightwardsStake   =  max(0, gravity.x);
+    float leftwardsStake    =  max(0, -gravity.x);
+    float sum = upwardsStake + downwardsStake + leftwardsStake + rightwardsStake;
+    
+    // calculate how much fluid will flow in each adjacent cell while following gravity
+    float flowU = (1 - obsticleU) * FlowDownRatio(fluid, fluidU, upwardsStake, sum);
+    float flowD = (1 - obsticleD) * FlowDownRatio(fluid, fluidD, downwardsStake, sum);
+    float flowR = (1 - obsticleR) * FlowDownRatio(fluid, fluidR, rightwardsStake, sum);
+    float flowL = (1 - obsticleL) * FlowDownRatio(fluid, fluidL, leftwardsStake, sum);
+    
+    // log the outwards flow from gravity
+    disp.x = flowU; // flow right 
+    disp.y = flowD; // flow left
+    disp.z = flowR; // flow right 
+    disp.w = flowL; // flow left
+    
+    // remove outward flow from the remaining fluid
+    fluid -= flowU + flowD + flowL + flowR;
+    
+    
+    // split left and right
+    float2 left = float2(gravity.y, -gravity.x);
+    
+    // How much up/down and left/right matter in spliting the water
+    // how relatively perpendicular to gravity are these cells 
+        // These can be paired because they in opposite directions that 
+        // have the same simmilarity the to left or right directions
+    float2 upDownStake      = abs(left.y);
+    float2 rightLeftStake   = abs(left.x);
+    
+    // correct the stakes so they sum to one
+    upDownStake /= (upDownStake + rightLeftStake);
+    rightLeftStake /= (upDownStake + rightLeftStake);
+    
+    // how much more water is here then on the left and right
+    float unbalanceU = (1 - obsticleU) * max(fluid - fluidU, 0);
+    float unbalanceD = (1 - obsticleD) * max(fluid - fluidD, 0);
+    float unbalanceR = (1 - obsticleR) * max(fluid - fluidR, 0);
+    float unbalanceL = (1 - obsticleL) * max(fluid - fluidL, 0);
+    
+    // apply the stake and max flow to calculate outwards flow
+    flowU = min(unbalanceU * upDownStake / 3, MaxFlow);
+    flowD = min(unbalanceD * upDownStake / 3, MaxFlow);
+    flowR = min(unbalanceR * rightLeftStake / 3, MaxFlow);
+    flowL = min(unbalanceL * rightLeftStake / 3, MaxFlow);
+    
+    // apply the outwards flows from water splitting perpendicular to gravity
+    disp.x += flowU; // flow right 
+    disp.y += flowD; // flow left
+    disp.z += flowR; // flow right 
+    disp.w += flowL; // flow left
+        
+    // subtrack the outwards flows from the remaining fluid
+    fluid -= flowU + flowD + flowL + flowR;
+    
+    
+    // pressure upwards
+    
+    // how much of each unit direction is considered "Upward"
+    upwardsStake    = max(0, -gravity.y);
+    downwardsStake  = max(0, gravity.y);
+    rightwardsStake = max(0, -gravity.x);
+    leftwardsStake  = max(0, gravity.x);
+    sum = upwardsStake + downwardsStake + leftwardsStake + rightwardsStake;
+    
+    // calculate how much the water will flow upwards into each adjacent tile
+    flowU = FlowUpRatio(fluid, fluidU, upwardsStake, sum);
+    flowD = FlowUpRatio(fluid, fluidD, downwardsStake, sum);
+    flowR = FlowUpRatio(fluid, fluidR, rightwardsStake, sum);
+    flowL = FlowUpRatio(fluid, fluidL, leftwardsStake, sum);
+    
+    // apply the outwards flows from water pressure
+    disp.x += flowU; // flow right 
+    disp.y += flowD; // flow left
+    disp.z += flowR; // flow right 
+    disp.w += flowL; // flow left
+    
+    // last check for an overflow of too much water leacing this cell
+    float outwardFlow = disp.x + disp.y + disp.z + disp.w;
+    if (outwardFlow > fluidH)
+        disp = disp / outwardFlow * fluidH;
+    
+    // copy the information to the dispersion map
+    Dispersion[id.xy] = disp;
+    
+}

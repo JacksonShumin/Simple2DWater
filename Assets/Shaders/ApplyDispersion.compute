@@ -1,0 +1,49 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// read only maps
+RWTexture2D<float> FluidIn;     // fluid map (from last frame)
+RWTexture2D<float> Obsticles;   // obsticle map
+RWTexture2D<float4> Dispersion; // dispersion map for outgoing flow -> (up, down, right, left)
+
+// write only fluid map (for this frame)
+RWTexture2D<float> FluidOut;
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // short circuit out if this is an obsticle
+    if (Obsticles[id.xy] > 0)
+        return;
+    
+    // fet the fluid level and the dispersion 
+    float fluid = FluidIn[id.xy];
+    float4 dispH = Dispersion[id.xy];
+    
+    // remove outgoing fluid
+    fluid -= (dispH.x + dispH.y + dispH.z + dispH.w);
+    
+    // add incoming fluid from all directions
+    uint2 up = id.xy + uint2(0, 1);
+    if (Obsticles[up] == 0)
+        fluid += Dispersion[up].y;
+    
+    uint2 down = id.xy - uint2(0, 1);
+    if (Obsticles[down] == 0)
+        fluid += Dispersion[down].x;
+    
+    uint2 right = id.xy + uint2(1, 0);
+    if (Obsticles[right] == 0)
+        fluid += Dispersion[right].w;
+    
+    uint2 left = id.xy - uint2(1, 0);
+    if (Obsticles[left] == 0)
+        fluid += Dispersion[left].z;
+    
+    // remove fluids bellow the minimum threshold
+    if (fluid < 0.0001f)
+        fluid = 0;
+    
+    // write the new fluid to the fluid map
+    FluidOut[id.xy] = fluid;
+}
